@@ -2,7 +2,7 @@
    TRACELET — Smart Safety Pendant Companion App
    Client-side logic. Contacts/settings persist to localStorage.
    Live pendant data (location, SOS) arrives from Firebase
-   Realtime Database when config.js is filled in.
+   Realtime Database and triggers EmailJS alerts to guardians.
    ========================================================= */
 
 (() => {
@@ -18,7 +18,6 @@
     LOCATION: 'tracelet_last_location'
   };
 
-  // Old keys from the "aurelia" version — migrated automatically so no data is lost.
   const LEGACY_KEYS = {
     CONTACTS: 'aurelia_contacts',
     SETTINGS: 'aurelia_settings',
@@ -34,7 +33,6 @@
     sound: true
   };
 
-  // Starting mock coordinates (Manila, PH) — used if real GPS is unavailable.
   const MOCK_ORIGIN = { lat: 14.5547, lng: 121.0244 };
 
   /* ----------------------------------------------------
@@ -163,7 +161,6 @@
     });
     document.getElementById('mobileNav').classList.add('hidden');
 
-    // Leaflet needs a resize nudge when its container becomes visible.
     if (name === 'map' && state.map) {
       setTimeout(() => state.map.invalidateSize(), 80);
     }
@@ -193,7 +190,6 @@
     document.getElementById('contactsCountLabel').textContent = `${state.contacts.length} saved`;
   }
 
-  // Slowly drains the mock battery over time, just for realism.
   function simulateBatteryDrain() {
     setInterval(() => {
       if (state.settings.battery > 5) {
@@ -205,10 +201,8 @@
   }
 
   /* ----------------------------------------------------
-     GPS / MAP  (Leaflet + OpenFreeMap dark vector tiles, keyless raster fallbacks)
+     GPS / MAP
   ---------------------------------------------------- */
-  // Primary: OpenFreeMap "dark" vector style (free, no API key, no request limits),
-  // rendered by MapLibre GL inside the Leaflet map through maplibre-gl-leaflet.
   const VECTOR_SOURCE = {
     style: 'https://tiles.openfreemap.org/styles/dark',
     attribution:
@@ -217,28 +211,23 @@
       'Data from <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
   };
 
-  // Fallbacks (plain raster tiles, no API key) used if WebGL / MapLibre is unavailable
-  // or the vector style keeps failing to load.
   const TILE_SOURCES = [
     {
-      // Fallback 1: Esri World Dark Gray canvas (dark, no API key)
       url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
       options: {
-        maxNativeZoom: 16, // tiles stop at 16; Leaflet upscales beyond that
+        maxNativeZoom: 16,
         maxZoom: 19,
-        attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a> &mdash; Esri, DeLorme, NAVTEQ'
+        attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a>'
       }
     },
     {
-      // Fallback 2: Esri World Street Map (detailed, light, no API key)
       url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
       options: {
         maxZoom: 19,
-        attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a> &mdash; Esri, DeLorme, NAVTEQ'
+        attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a>'
       }
     },
     {
-      // Fallback 3: standard OpenStreetMap tiles (no API key required)
       url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
       options: {
         maxZoom: 19,
@@ -259,8 +248,7 @@
 
   function initMap() {
     if (!window.L) {
-      console.error('Leaflet failed to load — map disabled.');
-      toast('Map library could not be loaded. Check your connection.', 'danger', 'alert-triangle');
+      toast('Map library could not be loaded.', 'danger', 'alert-triangle');
       updateLocationDisplays();
       return;
     }
@@ -268,10 +256,8 @@
     state.map = L.map('map', { zoomControl: true, attributionControl: false })
       .setView([state.currentLocation.lat, state.currentLocation.lng], 15);
 
-    // Keep the required tile credits, drop the "Leaflet" prefix.
     L.control.attribution({ prefix: false }).addTo(state.map);
 
-    // Basemap: vector (OpenFreeMap + MapLibre) first, then raster fallbacks.
     let rasterIndex = 0;
     let baseLayer = null;
 
@@ -299,13 +285,9 @@
         const gl = baseLayer.getMaplibreMap();
         gl.on('error', () => {
           errors++;
-          if (errors === 3) {
-            console.warn('Vector basemap failed — switching to raster fallback.');
-            useRaster(rasterIndex);
-          }
+          if (errors === 3) useRaster(rasterIndex);
         });
       } catch (e) {
-        console.warn('Vector basemap unavailable — using raster fallback.', e);
         if (baseLayer) state.map.removeLayer(baseLayer);
         baseLayer = null;
         useRaster(rasterIndex);
@@ -361,7 +343,7 @@
 
   function useRealGps() {
     if (!('geolocation' in navigator)) {
-      toast('Geolocation is not supported on this device. Using simulated location instead.', 'danger', 'alert-triangle');
+      toast('Geolocation is not supported on this device.', 'danger', 'alert-triangle');
       return;
     }
     toast('Requesting device location permission…', 'info', 'locate-fixed');
@@ -376,14 +358,12 @@
         logActivity('Switched to real device GPS', 'locate-fixed');
       },
       (err) => {
-        toast('Could not access real GPS (' + err.message + '). Falling back to simulation.', 'danger', 'alert-triangle');
+        toast('Could not access real GPS (' + err.message + ').', 'danger', 'alert-triangle');
       },
       { enableHighAccuracy: true, timeout: 8000 }
     );
   }
 
-  // Randomly "wanders" the pendant's position a little, to simulate movement
-  // when no real device / GPS hardware is connected.
   function simulateMovement() {
     if (Date.now() - state.lastDeviceUpdate < 60000) {
       toast('A live pendant is sending its location — simulation is disabled.', 'info', 'radio');
@@ -405,8 +385,6 @@
 
   /* ----------------------------------------------------
      LIVE PENDANT (Firebase Realtime Database)
-     The ESP32 pendant writes lat / lng / sos / updatedAt to
-     devices/<deviceId>. This app listens and mirrors it.
   ---------------------------------------------------- */
   function isLiveConfigured(cfg) {
     return !!(cfg && cfg.firebase && cfg.deviceId &&
@@ -422,7 +400,6 @@
       return;
     }
     if (!window.firebase) {
-      console.warn('Firebase SDK did not load — live pendant sync disabled.');
       toast('Could not load Firebase. Live pendant sync is off.', 'danger', 'alert-triangle');
       return;
     }
@@ -454,7 +431,6 @@
   function handleDeviceData(d) {
     state.lastDeviceUpdate = Date.now();
 
-    // A live pendant replaces the movement simulation.
     if (state.simInterval) {
       clearInterval(state.simInterval);
       state.simInterval = null;
@@ -476,7 +452,7 @@
   }
 
   /* ----------------------------------------------------
-     SOS / EMERGENCY ALERT SYSTEM
+     SOS / EMERGENCY EMAIL ALERT SYSTEM
   ---------------------------------------------------- */
   function triggerSos(coords = null) {
     if (state.sosActive) return;
@@ -484,63 +460,94 @@
 
     const overlay = document.getElementById('sosOverlay');
     overlay.classList.remove('hidden');
-    document.getElementById('sosStatusText').textContent = 'Dispatching alert to emergency contacts…';
+    document.getElementById('sosStatusText').textContent = 'Dispatching email alert to guardians…';
     document.getElementById('sosCoordsText').textContent = 'Acquiring precise location…';
 
     if (state.settings.sound) playAlertTone();
-    logActivity(coords ? 'SOS triggered from pendant' : 'SOS triggered', 'shield-alert');
+    logActivity(coords ? 'SOS triggered from ESP32 pendant' : 'SOS triggered manually', 'shield-alert');
 
     const finishDispatch = (lat, lng) => {
-      if (!state.sosActive) return; // cancelled while locating
+      if (!state.sosActive) return;
       setLocation(lat, lng);
       const coordText = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
       document.getElementById('sosCoordsText').textContent = `Coordinates: ${coordText}`;
-      dispatchMockAlerts(coordText);
+      dispatchEmailAlerts(coordText);
     };
 
-    if (coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lng)) {
-      // SOS came from the pendant itself — use its coordinates, not the phone's.
-      finishDispatch(coords.lat, coords.lng);
-    } else if ('geolocation' in navigator) {
+    // Prioritize browser GPS if ESP32 only sends dummy test coords, or use ESP32 coords if valid
+    if ('geolocation' in navigator) {
       navigator.geolocation.getCurrentPosition(
         (pos) => finishDispatch(pos.coords.latitude, pos.coords.longitude),
-        () => finishDispatch(state.currentLocation.lat, state.currentLocation.lng),
-        { enableHighAccuracy: true, timeout: 5000 }
+        () => {
+          const fallbackLat = (coords && Number.isFinite(coords.lat)) ? coords.lat : state.currentLocation.lat;
+          const fallbackLng = (coords && Number.isFinite(coords.lng)) ? coords.lng : state.currentLocation.lng;
+          finishDispatch(fallbackLat, fallbackLng);
+        },
+        { enableHighAccuracy: true, timeout: 4000 }
       );
     } else {
-      finishDispatch(state.currentLocation.lat, state.currentLocation.lng);
+      const fallbackLat = (coords && Number.isFinite(coords.lat)) ? coords.lat : state.currentLocation.lat;
+      const fallbackLng = (coords && Number.isFinite(coords.lng)) ? coords.lng : state.currentLocation.lng;
+      finishDispatch(fallbackLat, fallbackLng);
     }
   }
 
-  function dispatchMockAlerts(coordText) {
+  function dispatchEmailAlerts(coordText) {
     const statusEl = document.getElementById('sosStatusText');
+    const cfg = window.TRACELET_CONFIG?.emailjs;
 
-    if (!state.contacts.length) {
-      statusEl.textContent = 'No emergency contacts saved — add a guardian to enable alerts.';
-      toast('SOS active, but you have no saved emergency contacts.', 'danger', 'user-x');
+    const emailContacts = state.contacts.filter(c => c.email && c.email.trim() !== '');
+
+    if (!emailContacts.length) {
+      statusEl.textContent = 'No emergency emails saved — add a guardian email to enable alerts.';
+      toast('SOS active, but no guardian emails are registered.', 'danger', 'user-x');
       return;
     }
 
-    const mapsLink = `https://maps.google.com/?q=${encodeURIComponent(coordText.replace(/\s/g, ''))}`;
-    let i = 0;
-    const sendNext = () => {
-      if (!state.sosActive) return; // stop if the alert was cancelled
-      if (i >= state.contacts.length) {
-        statusEl.textContent = `Alert sent to all ${state.contacts.length} guardian(s) with your live coordinates.`;
-        return;
-      }
-      const contact = state.contacts[i];
-      const message = `SOS ALERT from ${state.settings.name}: I may be in danger. My current location is ${coordText}. ${mapsLink}`;
-      statusEl.textContent = `Sending to ${contact.name} (${contact.phone})…`;
-      setTimeout(() => {
-        if (!state.sosActive) return;
-        logActivity(`Mock alert sent to ${contact.name}`, 'send');
-        console.log('[MOCK SMS DISPATCH]', { to: contact.phone, message });
-        i++;
-        sendNext();
-      }, 700);
-    };
-    sendNext();
+    if (!cfg || !cfg.publicKey || cfg.publicKey.includes('PASTE')) {
+      statusEl.textContent = 'EmailJS keys missing in config.js — check console.';
+      console.warn('[EMAIL ALERT] Configure emailjs in config.js to dispatch real emails.');
+      return;
+    }
+
+    if (!window.emailjs) {
+      statusEl.textContent = 'EmailJS library failed to load.';
+      return;
+    }
+
+    emailjs.init({ publicKey: cfg.publicKey });
+
+    const mapsLink = `https://www.google.com/maps?q=${encodeURIComponent(coordText.replace(/\s/g, ''))}`;
+    let sentCount = 0;
+
+    emailContacts.forEach((contact) => {
+      statusEl.textContent = `Sending emergency email to ${contact.name} (${contact.email})…`;
+
+      const templateParams = {
+        to_name: contact.name,
+        guardian_email: contact.email,
+        user_name: state.settings.name || 'Tracelet User',
+        device_name: state.settings.deviceName || 'Tracelet Pendant',
+        coordinates: coordText,
+        location_link: mapsLink,
+        timestamp: new Date().toLocaleString()
+      };
+
+      emailjs.send(cfg.serviceId, cfg.templateId, templateParams)
+        .then(() => {
+          sentCount++;
+          logActivity(`SOS email sent to ${contact.name}`, 'mail');
+          if (sentCount === emailContacts.length) {
+            statusEl.textContent = `Emergency email sent to all ${emailContacts.length} guardian(s)!`;
+            toast(`SOS email delivered to ${sentCount} guardian(s).`, 'success', 'mail-check');
+          }
+        })
+        .catch((err) => {
+          console.error('EmailJS error for', contact.email, err);
+          statusEl.textContent = `Failed to send email to ${contact.name}. Check console.`;
+          toast(`Email failed for ${contact.name}.`, 'danger', 'alert-triangle');
+        });
+    });
   }
 
   function cancelSos() {
@@ -553,7 +560,6 @@
     logActivity('SOS alert cancelled', 'shield-off');
   }
 
-  // Plays a short synthesized alert tone using the Web Audio API — no asset files needed.
   function playAlertTone() {
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -591,15 +597,16 @@
 
     grid.innerHTML = state.contacts.map(c => `
       <div class="glass-card p-5 contact-card" data-id="${escapeHtml(c.id)}">
-        <div class="flex items-start gap-3">
+        <div class="flex items-start gap-3 overflow-hidden">
           <div class="contact-avatar">${escapeHtml(initials(c.name))}</div>
-          <div>
-            <p class="font-semibold text-white">${escapeHtml(c.name)}</p>
-            <p class="text-sm text-slate-400">${escapeHtml(c.phone)}</p>
+          <div class="min-w-0">
+            <p class="font-semibold text-white truncate">${escapeHtml(c.name)}</p>
+            <p class="text-sm text-gold-400 truncate">${escapeHtml(c.email || 'No email set')}</p>
+            ${c.phone ? `<p class="text-xs text-slate-400 mt-0.5">${escapeHtml(c.phone)}</p>` : ''}
             ${c.relation ? `<span class="inline-block mt-1.5 text-[10px] uppercase tracking-wide text-gold-400 bg-gold-400/10 px-2 py-0.5 rounded-full">${escapeHtml(c.relation)}</span>` : ''}
           </div>
         </div>
-        <div class="flex flex-col gap-1.5">
+        <div class="flex flex-col gap-1.5 flex-shrink-0">
           <button class="glass-btn w-8 h-8 rounded-full flex items-center justify-center edit-contact-btn" data-id="${escapeHtml(c.id)}" title="Edit">
             <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
           </button>
@@ -632,7 +639,8 @@
       title.textContent = 'Edit Guardian';
       document.getElementById('contactId').value = contact.id;
       document.getElementById('contactName').value = contact.name;
-      document.getElementById('contactPhone').value = contact.phone;
+      document.getElementById('contactEmail').value = contact.email || '';
+      document.getElementById('contactPhone').value = contact.phone || '';
       document.getElementById('contactRelation').value = contact.relation || '';
     } else {
       title.textContent = 'Add Guardian';
@@ -650,22 +658,23 @@
     e.preventDefault();
     const id = document.getElementById('contactId').value;
     const name = document.getElementById('contactName').value.trim();
+    const email = document.getElementById('contactEmail').value.trim();
     const phone = document.getElementById('contactPhone').value.trim();
     const relation = document.getElementById('contactRelation').value.trim();
 
-    if (!name || !phone) {
-      toast('Name and phone number are required.', 'danger', 'alert-triangle');
+    if (!name || !email) {
+      toast('Name and email address are required.', 'danger', 'alert-triangle');
       return;
     }
 
     if (id) {
       const contact = state.contacts.find(c => c.id === id);
       if (!contact) return;
-      Object.assign(contact, { name, phone, relation });
+      Object.assign(contact, { name, email, phone, relation });
       toast(`Updated ${name}.`, 'success', 'check-circle-2');
       logActivity(`Updated guardian ${name}`, 'pencil');
     } else {
-      state.contacts.push({ id: uid(), name, phone, relation });
+      state.contacts.push({ id: uid(), name, email, phone, relation });
       toast(`${name} added as a guardian.`, 'success', 'user-plus');
       logActivity(`Added guardian ${name}`, 'user-plus');
     }
@@ -702,10 +711,8 @@
   }
 
   /* ----------------------------------------------------
-     FASHION CATALOG (static demo data)
+     FASHION CATALOG
   ---------------------------------------------------- */
-  // Catalog images correspond to the product renders, mapped in
-  // numbering order (image 1 -> item 1, image 2 -> item 2, etc).
   const CATALOG_ITEMS = [
     { name: 'Étoile Necklace', style: 'Minimalist Pendant', image: 'assets/catalog/catalog-1.png',
       desc: 'A teardrop charm in brushed gold that houses the sensor module — everyday elegance with a hidden SOS trigger.' },
@@ -734,7 +741,6 @@
       </div>
     `).join('');
 
-    // If an image file is missing, hide it instead of showing a broken icon.
     grid.querySelectorAll('.catalog-img').forEach(img => {
       img.addEventListener('error', () => { img.style.visibility = 'hidden'; });
     });
@@ -790,7 +796,7 @@
         switch (action) {
           case 'share-location': {
             const { lat, lng } = state.currentLocation;
-            const link = `https://maps.google.com/?q=${lat.toFixed(5)},${lng.toFixed(5)}`;
+            const link = `https://www.google.com/maps?q=${lat.toFixed(5)},${lng.toFixed(5)}`;
             copyToClipboard(link)
               .then(() => toast('Location link copied — ready to share with your guardians.', 'success', 'share-2'))
               .catch(() => toast('Location link ready: ' + link, 'info', 'share-2'));
@@ -798,7 +804,7 @@
             break;
           }
           case 'check-in':
-            toast('Safe check-in sent to your guardians.', 'success', 'check-circle-2');
+            toast('Safe check-in logged.', 'success', 'check-circle-2');
             logActivity('Sent a safe check-in', 'check-circle-2');
             break;
           case 'goto-contacts':
@@ -845,7 +851,7 @@
     initLiveDevice();
 
     if (!state.contacts.length && !state.activity.length) {
-      logActivity('Welcome to Tracelet — add your first guardian to get started', 'sparkles');
+      logActivity('Welcome to Tracelet — add a guardian email to get started', 'sparkles');
     }
   }
 
