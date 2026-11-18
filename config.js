@@ -12,7 +12,7 @@ window.TRACELET_CONFIG = {
 
   emailjs: {
     publicKey: 'YiJopzBSfhhgLHPXf',  // <-- Your real public key here
-    serviceId: 'service_ikzgvt4',         // <-- Your real service ID here
-    templateId: 'template_vwo77g5'        // <-- Your real template ID here
+    serviceId: 'service_ss3i8q6',         // <-- Your real service ID here
+    templateId: 'template_0xhqgxn'        // <-- Your real template ID here
   }
 };
