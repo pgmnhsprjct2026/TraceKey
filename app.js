@@ -838,7 +838,7 @@
     initSosUI();
 
     // Migrate old saved device name to the new product name
-    if (state.settings.deviceName === 'TraceKey') {
+    if (/tracelet|pendant/i.test(state.settings.deviceName || '')) {
       state.settings.deviceName = 'TraceKey';
       saveJSON(STORAGE_KEYS.SETTINGS, state.settings);
     }
